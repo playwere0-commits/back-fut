@@ -10,43 +10,37 @@ app.use(cors())
 app.use(express.json())
 
 const PORT = process.env.PORT || 3000
+const ENABLE_POLLING = process.env.ENABLE_POLLING === "true"
+const TIMEZONE = process.env.TIMEZONE || "America/Argentina/Buenos_Aires"
 
 // 🧠 Ligas permitidas
 const allowedLeagues = [
-  128, // Liga Profesional Argentina
-  39,  // Premier League
-  140, // La Liga
-  135, // Serie A
-  78,  // Bundesliga
-  61,  // Ligue 1
-  262, // Liga MX
-  253, // MLS
-  2,   // Champions League
-  3,   // Europa League
-  13,  // Libertadores
-  11,  // Sudamericana
-  143  // Copa del Rey
+  128, 39, 140, 135, 78, 61, 262, 253, 2, 3, 13, 11, 143
 ]
 
 // 🧠 CACHE
 let liveCache = []
 let hasLive = false
 let interval = null
+let isFetching = false
 
-// 🔴 FETCH LIVE (desde API)
+// 🔴 FETCH LIVE
 const fetchLiveMatches = async () => {
+  if (isFetching) return
+  isFetching = true
+
   try {
     const response = await axios.get(`${process.env.API_URL}/fixtures`, {
       params: {
         live: "all",
-        timezone: "America/Argentina/Buenos_Aires"
+        timezone: TIMEZONE
       },
       headers: {
         "x-apisports-key": process.env.API_KEY
       }
     })
 
-    const matches = response.data.response || []
+    const matches = response.data.response ?? []
 
     const filtered = matches.filter(match =>
       allowedLeagues.includes(match.league.id)
@@ -55,12 +49,10 @@ const fetchLiveMatches = async () => {
     liveCache = filtered
     hasLive = filtered.length > 0
 
-    console.log(
-      `🔄 Live actualizados: ${liveCache.length} partidos | hasLive: ${hasLive}`
-    )
-
   } catch (error) {
-    console.error("Error LIVE:", error.response?.data || error.message)
+    console.error("LIVE error:", error.response?.data || error.message)
+  } finally {
+    isFetching = false
   }
 }
 
@@ -68,30 +60,59 @@ const fetchLiveMatches = async () => {
 const startPolling = () => {
   if (interval) clearInterval(interval)
 
-  const delay = hasLive ? 60000 : 300000 // 1 min o 5 min
+  const delay = hasLive ? 60000 : 300000
 
   interval = setInterval(async () => {
     await fetchLiveMatches()
-    startPolling() // 🔥 reajusta el intervalo dinámicamente
+    startPolling()
   }, delay)
-
-  console.log(`⏱ Polling cada ${delay / 1000}s`)
 }
 
-// 🚀 INIT
+// 🚀 INIT SOLO SI ESTÁ ACTIVADO
 const init = async () => {
   await fetchLiveMatches()
   startPolling()
 }
 
-init()
+if (ENABLE_POLLING) {
+  init()
+}
 
-// 🔴 ENDPOINT LIVE (usa cache)
-app.get("/live", (req, res) => {
-  res.json(liveCache)
+// 🔴 ENDPOINT LIVE (híbrido)
+app.get("/live", async (req, res) => {
+  try {
+    if (ENABLE_POLLING) {
+      if (liveCache.length === 0) {
+        await fetchLiveMatches()
+      }
+      return res.json(liveCache)
+    }
+
+    const response = await axios.get(`${process.env.API_URL}/fixtures`, {
+      params: {
+        live: "all",
+        timezone: TIMEZONE
+      },
+      headers: {
+        "x-apisports-key": process.env.API_KEY
+      }
+    })
+
+    const matches = response.data.response ?? []
+
+    const filtered = matches.filter(match =>
+      allowedLeagues.includes(match.league.id)
+    )
+
+    res.json(filtered)
+
+  } catch (error) {
+    console.error("LIVE endpoint error:", error.response?.data || error.message)
+    res.status(500).json({ error: "Error fetching live matches" })
+  }
 })
 
-// 🟡 ENDPOINT TODAY (sin cache)
+// 🟡 ENDPOINT TODAY
 app.get("/today", async (req, res) => {
   try {
     const { date, timezone } = req.query
@@ -103,14 +124,14 @@ app.get("/today", async (req, res) => {
     const response = await axios.get(`${process.env.API_URL}/fixtures`, {
       params: {
         date,
-        timezone: timezone || "America/Argentina/Buenos_Aires"
+        timezone: timezone || TIMEZONE
       },
       headers: {
         "x-apisports-key": process.env.API_KEY
       }
     })
 
-    const matches = response.data.response || []
+    const matches = response.data.response ?? []
 
     const filtered = matches.filter(match =>
       allowedLeagues.includes(match.league.id)
@@ -119,12 +140,17 @@ app.get("/today", async (req, res) => {
     res.json(filtered)
 
   } catch (error) {
-    console.error("Error TODAY:", error.response?.data || error.message)
+    console.error("TODAY error:", error.response?.data || error.message)
     res.status(500).json({ error: "Error fetching today matches" })
   }
 })
 
+// 🟢 HEALTH CHECK (opcional pero recomendado)
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" })
+})
+
 // 🚀 SERVER
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`)
+  console.log(`Servidor corriendo en puerto ${PORT}`)
 })
