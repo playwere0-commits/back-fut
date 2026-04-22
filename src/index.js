@@ -1,7 +1,10 @@
 import express from "express"
 import cors from "cors"
-import axios from "axios"
 import dotenv from "dotenv"
+
+import liveRoutes, { initLivePolling } from "./routes/live.js"
+import todayRoutes from "./routes/today.js"
+import matchRoutes from "./routes/match.js"
 
 dotenv.config()
 
@@ -10,182 +13,32 @@ app.use(cors())
 app.use(express.json())
 
 const PORT = process.env.PORT || 3000
-const ENABLE_POLLING = process.env.ENABLE_POLLING === "true"
-const TIMEZONE = process.env.TIMEZONE || "America/Argentina/Buenos_Aires"
 
 // 🧠 Ligas permitidas
 const allowedLeagues = [
   128, 39, 140, 135, 78, 61, 262, 253, 2, 3, 13, 11, 143
 ]
 
-// 🧠 CACHE
-let liveCache = []
-let hasLive = false
-let interval = null
-let isFetching = false
-
-// 🔴 FETCH LIVE
-const fetchLiveMatches = async () => {
-  if (isFetching) return
-  isFetching = true
-
-  try {
-    const response = await axios.get(`${process.env.API_URL}/fixtures`, {
-      params: {
-        live: "all",
-        timezone: TIMEZONE
-      },
-      headers: {
-        "x-apisports-key": process.env.API_KEY
-      }
-    })
-
-    const matches = response.data.response ?? []
-
-    const filtered = matches.filter(match =>
-      allowedLeagues.includes(match.league.id)
-    )
-
-    liveCache = filtered
-    hasLive = filtered.length > 0
-
-  } catch (error) {
-    console.error("LIVE error:", error.response?.data || error.message)
-  } finally {
-    isFetching = false
-  }
-}
-
-// ⏱ POLLING DINÁMICO
-const startPolling = () => {
-  if (interval) clearInterval(interval)
-
-  const delay = hasLive ? 60000 : 300000
-
-  interval = setInterval(async () => {
-    await fetchLiveMatches()
-    startPolling()
-  }, delay)
-}
-
-// 🚀 INIT SOLO SI ESTÁ ACTIVADO
-const init = async () => {
-  await fetchLiveMatches()
-  startPolling()
-}
-
-if (ENABLE_POLLING) {
-  init()
-}
-
-// 🔴 ENDPOINT LIVE (híbrido)
-app.get("/live", async (req, res) => {
-  try {
-    if (ENABLE_POLLING) {
-      if (liveCache.length === 0) {
-        await fetchLiveMatches()
-      }
-      return res.json(liveCache)
-    }
-
-    const response = await axios.get(`${process.env.API_URL}/fixtures`, {
-      params: {
-        live: "all",
-        timezone: TIMEZONE
-      },
-      headers: {
-        "x-apisports-key": process.env.API_KEY
-      }
-    })
-
-    const matches = response.data.response ?? []
-
-    const filtered = matches.filter(match =>
-      allowedLeagues.includes(match.league.id)
-    )
-
-    res.json(filtered)
-
-  } catch (error) {
-    console.error("LIVE endpoint error:", error.response?.data || error.message)
-    res.status(500).json({ error: "Error fetching live matches" })
-  }
+// 👉 Middleware para compartir ligas en todas las rutas
+app.use((req, res, next) => {
+  req.allowedLeagues = allowedLeagues
+  next()
 })
 
-// 🟡 ENDPOINT TODAY
-app.get("/today", async (req, res) => {
-  try {
-    const { date, timezone } = req.query
+// 🚀 RUTAS
+app.use("/live", liveRoutes)
+app.use("/today", todayRoutes)
+app.use("/match", matchRoutes)
 
-    if (!date) {
-      return res.status(400).json({ error: "date es requerido" })
-    }
-
-    const response = await axios.get(`${process.env.API_URL}/fixtures`, {
-      params: {
-        date,
-        timezone: timezone || TIMEZONE
-      },
-      headers: {
-        "x-apisports-key": process.env.API_KEY
-      }
-    })
-
-    const matches = response.data.response ?? []
-
-    const filtered = matches.filter(match =>
-      allowedLeagues.includes(match.league.id)
-    )
-
-    res.json(filtered)
-
-  } catch (error) {
-    console.error("TODAY error:", error.response?.data || error.message)
-    res.status(500).json({ error: "Error fetching today matches" })
-  }
-})
-
-// 🟢 HEALTH CHECK (opcional pero recomendado)
+// 🟢 HEALTH
 app.get("/health", (req, res) => {
   res.json({ status: "ok" })
 })
 
-app.get("/match/:id", async (req, res) => {
-  const { id } = req.params
-
-  try {
-    const [fixtureRes, lineupRes, statsRes] = await Promise.all([
-      axios.get(`${process.env.API_URL}/fixtures`, {
-        params: { id },
-        headers: {
-          "x-apisports-key": process.env.API_KEY
-        }
-      }),
-      axios.get(`${process.env.API_URL}/fixtures/lineups`, {
-        params: { fixture: id },
-        headers: {
-          "x-apisports-key": process.env.API_KEY
-        }
-      }),
-      axios.get(`${process.env.API_URL}/fixtures/statistics`, {
-        params: { fixture: id },
-        headers: {
-          "x-apisports-key": process.env.API_KEY
-        }
-      })
-    ])
-
-    res.json({
-      match: fixtureRes.data.response?.[0] || null,
-      lineups: lineupRes.data.response || [],
-      statistics: statsRes.data.response || []
-    })
-
-  } catch (error) {
-    console.error("MATCH error:", error.response?.data || error.message)
-    res.status(500).json({ error: "Error fetching match data" })
-  }
-})
+// 🚀 INIT POLLING
+if (process.env.ENABLE_POLLING === "true") {
+  initLivePolling(allowedLeagues)
+}
 
 // 🚀 SERVER
 app.listen(PORT, () => {
